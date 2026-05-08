@@ -14,9 +14,9 @@ TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "243466293"))
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
-VIDEO1_ID = os.environ.get("VIDEO1_ID", "")
-VIDEO2_ID = os.environ.get("VIDEO2_ID", "")
-VIDEO3_ID = os.environ.get("VIDEO3_ID", "")
+VIDEO1_URL = "https://youtu.be/M2NyDdw9Phc"
+VIDEO2_URL = "https://youtu.be/h8gk30CQNww"
+VIDEO3_URL = "https://youtu.be/smPkj7RzjFE"
 
 INSTAGRAM_URL = "https://www.instagram.com/mikhaildenisov_ap"
 
@@ -96,29 +96,13 @@ TEXT_AFTER_VIDEO3 = (
 )
 
 
-async def send_video_or_placeholder(chat_id, video_id, label, context, reply_markup=None):
-    if video_id:
-        await context.bot.send_video(
-            chat_id=chat_id,
-            video=video_id,
-            reply_markup=reply_markup
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"[{label} — скоро будет здесь]",
-            reply_markup=reply_markup
-        )
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    keyboard = [[InlineKeyboardButton("Смотрел, хочу дальше ▶️", callback_data="after_video1")]]
-    await update.message.reply_text(WELCOME_TEXT)
-    await send_video_or_placeholder(
-        update.effective_chat.id, VIDEO1_ID, "Видео 1", context,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    keyboard = [
+        [InlineKeyboardButton("▶️ Смотреть видео №1", url=VIDEO1_URL)],
+        [InlineKeyboardButton("Смотрел, хочу дальше →", callback_data="after_video1")]
+    ]
+    await update.message.reply_text(WELCOME_TEXT, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,20 +111,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
 
     if query.data == "after_video1":
-        keyboard = [[InlineKeyboardButton("Хочу узнать как работать с вами ▶️", callback_data="after_video2")]]
-        await context.bot.send_message(chat_id=chat_id, text=TEXT_AFTER_VIDEO1, disable_web_page_preview=True)
-        await send_video_or_placeholder(
-            chat_id, VIDEO2_ID, "Видео 2", context,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        keyboard = [
+            [InlineKeyboardButton("▶️ Смотреть видео №2", url=VIDEO2_URL)],
+            [InlineKeyboardButton("Хочу узнать как работать с вами →", callback_data="after_video2")]
+        ]
+        await context.bot.send_message(chat_id=chat_id, text=TEXT_AFTER_VIDEO1,
+                                       reply_markup=InlineKeyboardMarkup(keyboard),
+                                       disable_web_page_preview=True)
 
     elif query.data == "after_video2":
-        keyboard = [[InlineKeyboardButton("Записаться на консультацию ✅", callback_data="after_video3")]]
-        await context.bot.send_message(chat_id=chat_id, text=TEXT_AFTER_VIDEO2)
-        await send_video_or_placeholder(
-            chat_id, VIDEO3_ID, "Видео 3", context,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        keyboard = [
+            [InlineKeyboardButton("▶️ Смотреть видео №3", url=VIDEO3_URL)],
+            [InlineKeyboardButton("Записаться на консультацию ✅", callback_data="after_video3")]
+        ]
+        await context.bot.send_message(chat_id=chat_id, text=TEXT_AFTER_VIDEO2,
+                                       reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "after_video3":
         context.user_data["ai_active"] = True
