@@ -4,6 +4,7 @@ import logging
 import traceback
 import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Conflict, NetworkError, TimedOut, RetryAfter
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -53,9 +54,21 @@ async def notify_admin_ai_failure(context, user, where, error, user_text=None):
 
 
 async def error_handler(update, context):
-    """Глобальная сетка безопасности — ловит ЛЮБУЮ необработанную ошибку в любом хендлере."""
-    logger.exception("Unhandled error", exc_info=context.error)
-    tb = "".join(traceback.format_exception(type(context.error), context.error, context.error.__traceback__))
+    """Глобальная сетка безопасности — ловит ЛЮБУЮ необработанную ошибку в любом хендлере.
+
+    Шумные транспортные ошибки (Conflict при деплое Railway, временные сетевые сбои,
+    rate limit) только логируются — админу не шлются, иначе личка превращается в спам.
+    Это сбои инфраструктуры Telegram/Railway, на которые мы повлиять не можем —
+    они проходят сами за 10-60 секунд.
+    """
+    err = context.error
+    logger.exception("Unhandled error", exc_info=err)
+
+    # Транспортные/инфраструктурные ошибки не шлём админу.
+    if isinstance(err, (Conflict, NetworkError, TimedOut, RetryAfter)):
+        return
+
+    tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
     user_info = "unknown"
     if isinstance(update, Update) and update.effective_user:
         u = update.effective_user
