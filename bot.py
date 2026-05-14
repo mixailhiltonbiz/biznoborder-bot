@@ -248,7 +248,6 @@ def parse_number(text: str):
     t = text.strip().lower().replace(" ", "").replace(" ", "")
     if t in CALC_SKIP_WORDS:
         return None
-    t = t.replace(",", ".")
     multiplier = 1
     if t.endswith(("к", "k", "тыс")):
         multiplier = 1000
@@ -257,6 +256,18 @@ def parse_number(text: str):
         multiplier = 1_000_000
         t = t.rstrip("ммлн").rstrip("m")
     t = t.rstrip("%₽$руб")
+    # Разделители тысяч vs десятичная дробь: '500.000' / '500,000' / '1.500.000' = тысячи,
+    # '1.5' / '1,5' = десятичная.
+    seps = [c for c in t if c in ".,"]
+    if len(seps) > 1:
+        t = t.replace(".", "").replace(",", "")
+    elif len(seps) == 1:
+        idx = max(t.find("."), t.find(","))
+        after = t[idx + 1:]
+        if len(after) == 3 and after.isdigit():
+            t = t.replace(".", "").replace(",", "")
+        else:
+            t = t.replace(",", ".")
     return int(float(t) * multiplier)
 
 
