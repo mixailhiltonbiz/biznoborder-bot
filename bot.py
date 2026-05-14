@@ -816,7 +816,9 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     logger.info("Bot is running...")
-    app.run_polling()
+    # Telegram запомнил allowed_updates без callback_query —
+    # явно перерегистрируем все типы updates, иначе callback от inline-кнопок не доходит.
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
