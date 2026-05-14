@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -432,6 +433,66 @@ async def calc_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+def calculate_grant_profit(ad_spend, avg_ticket, leads=None, conv_lead_sale=None, margin=None):
+    """Чистая формула расчёта упущенной прибыли. Возвращает dict с числами для презентации."""
+    if margin is None:
+        margin = CALC_DEFAULT_MARGIN
+    if conv_lead_sale is None:
+        conv_lead_sale = CALC_DEFAULT_CONV_LEAD_SALE
+
+    default_cpl = (
+        CALC_DEFAULT_CPL_B2B if avg_ticket >= CALC_B2B_TICKET_THRESHOLD else CALC_DEFAULT_CPL_B2C
+    )
+    if leads is not None and ad_spend > 0 and leads > 0:
+        cpl = ad_spend / leads
+    else:
+        cpl = default_cpl
+        if leads is None and ad_spend > 0:
+            leads = ad_spend / cpl
+
+    leads_now = leads if leads else 0
+    sales_now = leads_now * conv_lead_sale / 100
+    revenue_now = sales_now * avg_ticket
+    profit_now = revenue_now * margin / 100
+
+    grant_rub = CALC_GRANT_BUDGET_USD * CALC_USD_RATE
+    eff_grant = grant_rub * CALC_GRANT_EFFICIENCY
+    leads_grant = eff_grant / cpl if cpl > 0 else 0
+    sales_grant = leads_grant * conv_lead_sale / 100
+    revenue_grant = sales_grant * avg_ticket
+    profit_grant_month = revenue_grant * margin / 100
+    profit_grant_year = profit_grant_month * 12
+    payback_months = CALC_PACKAGE_PRICE / profit_grant_month if profit_grant_month > 0 else None
+
+    if profit_grant_month >= 200_000:
+        verdict = "очень выгодно — окупаемость меньше полугода"
+    elif profit_grant_month >= 80_000:
+        verdict = "считается — окупаемость в пределах года"
+    else:
+        verdict = "на текущем масштабе грант не приоритет, сначала база"
+
+    return {
+        "cpl_rub": round(cpl),
+        "leads_now": round(leads_now),
+        "sales_now": round(sales_now, 1),
+        "profit_now_month_rub": round(profit_now),
+        "effective_grant_budget_rub": round(eff_grant),
+        "leads_grant": round(leads_grant),
+        "sales_grant": round(sales_grant, 1),
+        "profit_grant_month_rub": round(profit_grant_month),
+        "profit_grant_year_rub": round(profit_grant_year),
+        "package_price_rub": CALC_PACKAGE_PRICE,
+        "payback_months": round(payback_months, 1) if payback_months else None,
+        "verdict": verdict,
+        "assumptions": {
+            "usd_rate": CALC_USD_RATE,
+            "grant_efficiency_pct": int(CALC_GRANT_EFFICIENCY * 100),
+            "used_default_margin": margin == CALC_DEFAULT_MARGIN,
+            "used_default_conv": conv_lead_sale == CALC_DEFAULT_CONV_LEAD_SALE,
+        }
+    }
+
+
 async def send_calc_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data["calc_data"]
 
@@ -512,7 +573,211 @@ async def send_calc_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Failed to notify admin: {e}")
 
 
+CALC_AI_SYSTEM_PROMPT = """Ты — финансовый ассистент Михаила Денисова. Твоя единственная задача в этом диалоге — собрать у клиента 5 цифр и посчитать сколько он недополучает прибыли каждый месяц без Google Ad Grant.
+
+Тебе нужны 5 параметров:
+1. ad_spend — текущий бюджет на платную рекламу в месяц (Google Ads + Я.Директ + соцсети суммарно), ₽
+2. avg_ticket — средний чек одной продажи, ₽
+3. leads — заявок (лидов) в месяц с этого бюджета. Если клиент не знает — оставь пустым (формула подставит средние)
+4. conv_lead_sale — конверсия из заявки в продажу в %. Если клиент назвал количество продаж — посчитай % сам. Не знает — оставь пустым
+5. margin — маржа с продажи в %. Не знает — оставь пустым (формула поставит 40%)
+
+КАК ВЕСТИ ДИАЛОГ:
+- Говори живо, не как анкета. Реагируй на то что клиент написал
+- Если клиент в одном сообщении назвал несколько цифр — забирай все, не переспрашивай
+- Если рассказал про бизнес — задавай вопросы в контексте (онлайн-школа, товарный, B2B услуги, маркетплейс)
+- Реагируй на цифры: «10к за лид — много» или «5% конверсия — низковато». Это показывает экспертизу
+- НЕ продавай продукт. Твоя задача — посчитать. Продажа уже происходит в результате расчёта
+- Если клиент явно сопротивляется или не хочет отвечать — отстань с этой цифрой, иди дальше
+- Максимум 1-2 предложения за реплику. Без воды
+- Спрашивай не более одной цифры за раз
+
+КАК ПОНЯТЬ ЧТО ДАННЫХ ХВАТАЕТ:
+- Тебе обязательно нужны ad_spend и avg_ticket
+- Остальное (leads, conv_lead_sale, margin) можно оставить пустым — формула подставит средние
+- Как только у тебя есть ad_spend + avg_ticket + хотя бы попытка собрать остальные 3 → вызывай calculate_grant_profit
+
+ПОСЛЕ ВЫЗОВА ИНСТРУМЕНТА:
+- Получишь dict с цифрами
+- Презентуй РЕЗКО и ПРЯМО, как Михаил:
+  • Главное — «вы недополучаете X рублей каждый месяц / Y в год»
+  • Окупаемость пакета НКО под ключ (1М ₽)
+  • Если payback_months > 12 или verdict про «не приоритет» — будь честным: скажи что на этом масштабе грант не приоритет
+  • Если used_default_margin или used_default_conv = true — упомяни что часть цифр подставлены, точность ±20%
+- Закончи фразой типа «Хочешь разобрать твою ситуацию глубже? Скажи — переключу на разговор с Михаилом» — но НЕ дави
+
+ГОЛОС МИХАИЛА:
+- Короткие удары: «Математика не врёт.» «Это не теория.» «Окей, считаем.»
+- Прямой, провокационный, без официоза
+- Без слов: синергия, трансформация, инновационный, уникальный, эффективный
+- Без эмодзи в начале фраз — только если очень в тему
+
+Стартовая фраза диалога (если клиент только зашёл): спроси коротко про бизнес и бюджет рекламы. Без длинных вступлений.
+"""
+
+CALC_TOOL = {
+    "name": "calculate_grant_profit",
+    "description": (
+        "Считает упущенную прибыль клиента от отсутствия Google Ad Grant. "
+        "Вызывай когда собрал ad_spend и avg_ticket (это обязательно), "
+        "и хотя бы попытался узнать leads / conv_lead_sale / margin. "
+        "Параметры которые клиент не знает — не передавай (формула подставит средние)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "ad_spend": {
+                "type": "number",
+                "description": "Текущий бюджет на платную рекламу в месяц, в рублях. Обязательно."
+            },
+            "avg_ticket": {
+                "type": "number",
+                "description": "Средний чек одной продажи, в рублях. Обязательно."
+            },
+            "leads": {
+                "type": "number",
+                "description": "Заявок (лидов) в месяц. Не передавай если клиент не знает."
+            },
+            "conv_lead_sale": {
+                "type": "number",
+                "description": "Конверсия из заявки в продажу, в %. Не передавай если клиент не знает."
+            },
+            "margin": {
+                "type": "number",
+                "description": "Маржа с продажи, в %. Не передавай если клиент не знает."
+            },
+        },
+        "required": ["ad_spend", "avg_ticket"]
+    }
+}
+
+
+async def calc_ai_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    context.user_data["calc_ai_active"] = True
+    context.user_data["calc_ai_messages"] = []
+    context.user_data["calc_ai_done"] = False
+    await update.message.reply_text(
+        "Окей, посчитаем сколько ты теряешь без Google Grant.\n"
+        "Расскажи в двух словах — какой у тебя бизнес и сколько примерно "
+        "тратишь на рекламу в месяц?"
+    )
+
+
+def _format_calc_result_for_admin(user, calc_input, result):
+    def fmt(n):
+        return f"{int(round(n)):,}".replace(",", " ")
+    return (
+        f"📊 Прохождение калькулятора\n\n"
+        f"User: @{user.username or 'без username'} (id {user.id})\n"
+        f"Бюджет: {fmt(calc_input.get('ad_spend', 0))} ₽ | "
+        f"Чек: {fmt(calc_input.get('avg_ticket', 0))} ₽\n"
+        f"Лидов: {calc_input.get('leads', '?')} | "
+        f"Конв: {calc_input.get('conv_lead_sale', '?')}% | "
+        f"Маржа: {calc_input.get('margin', '?')}%\n\n"
+        f"Доп. прибыль с гранта: {fmt(result['profit_grant_month_rub'])} ₽/мес "
+        f"= {fmt(result['profit_grant_year_rub'])} ₽/год\n"
+        f"Окупаемость пакета 1М: {result['payback_months']} мес\n"
+        f"Вердикт: {result['verdict']}"
+    )
+
+
+async def calc_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    user = update.effective_user
+    messages = context.user_data.get("calc_ai_messages", [])
+    messages.append({"role": "user", "content": user_text})
+
+    # Защита от бесконечного диалога
+    if len(messages) > 40:
+        await update.message.reply_text(
+            "Слишком долгий разговор. Если хочешь — напиши Михаилу напрямую, разберём."
+        )
+        context.user_data["calc_ai_active"] = False
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    calc_result_this_turn = None
+    calc_input_this_turn = None
+
+    # Tool use loop — Claude может попросить вызвать инструмент, мы возвращаем результат, он отвечает текстом
+    for _ in range(5):  # макс 5 итераций tool use в одном ходе
+        response = ai_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            system=[{
+                "type": "text",
+                "text": CALC_AI_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            tools=[CALC_TOOL],
+            messages=messages,
+        )
+
+        # сохраняем ассистент-блок целиком (текст + tool_use)
+        assistant_blocks = [block.model_dump() for block in response.content]
+        messages.append({"role": "assistant", "content": assistant_blocks})
+
+        if response.stop_reason == "tool_use":
+            tool_use = next((b for b in response.content if b.type == "tool_use"), None)
+            if not tool_use:
+                break
+            try:
+                result = calculate_grant_profit(**tool_use.input)
+                calc_result_this_turn = result
+                calc_input_this_turn = tool_use.input
+                tool_result_content = json.dumps(result, ensure_ascii=False)
+                is_error = False
+            except Exception as e:
+                logger.exception("calc_tool error")
+                tool_result_content = f"Ошибка расчёта: {e}"
+                is_error = True
+
+            messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": tool_result_content,
+                    "is_error": is_error,
+                }],
+            })
+            # цикл продолжается — Claude теперь должен ответить текстом
+            continue
+
+        # stop_reason == "end_turn" или другое — финальный текст
+        text_block = next((b for b in response.content if b.type == "text"), None)
+        final_text = text_block.text if text_block else "..."
+
+        # если в этом ходе был сделан расчёт — показываем 3 кнопки и шлём уведомление админу
+        if calc_result_this_turn is not None and not context.user_data.get("calc_ai_done"):
+            keyboard = [
+                [InlineKeyboardButton("Разобрать мою ситуацию с Михаилом", callback_data="calc_to_ai")],
+                [InlineKeyboardButton("Посмотреть 3 видео как это работает", callback_data="calc_to_videos")],
+                [InlineKeyboardButton("Поделиться калькулятором", callback_data="calc_share")],
+            ]
+            await update.message.reply_text(final_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            context.user_data["calc_ai_done"] = True
+            try:
+                admin_msg = _format_calc_result_for_admin(user, calc_input_this_turn, calc_result_this_turn)
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_msg)
+            except Exception as e:
+                logger.warning(f"Failed to notify admin: {e}")
+        else:
+            await update.message.reply_text(final_text)
+        break
+    else:
+        # вышли по лимиту итераций
+        await update.message.reply_text("Что-то пошло не так с расчётом. Напиши Михаилу напрямую.")
+
+    context.user_data["calc_ai_messages"] = messages
+
+
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("calc_ai_active"):
+        await calc_ai_handler(update, context)
+        return
     if context.user_data.get("calc_step"):
         await calc_step(update, context)
         return
@@ -524,7 +789,8 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("calc", calc_start))
+    app.add_handler(CommandHandler("calc", calc_ai_start))
+    app.add_handler(CommandHandler("calcform", calc_start))  # fallback: жёсткая форма
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     logger.info("Bot is running...")
