@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import traceback
 import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -32,6 +33,42 @@ CALC_B2B_TICKET_THRESHOLD = 100000
 CALC_PACKAGE_PRICE = 1_000_000
 
 ai_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+async def notify_admin_ai_failure(context, user, where, error, user_text=None):
+    """Шлёт Михаилу уведомление когда AI-вызов упал."""
+    err_str = f"{type(error).__name__}: {error}"[:1000]
+    user_text_short = (user_text or "")[:300]
+    msg = (
+        f"🚨 Сбой бота в {where}\n\n"
+        f"User: @{user.username or 'без username'} (id {user.id})\n"
+        f"Имя: {user.full_name}\n\n"
+        f"Сообщение пользователя:\n{user_text_short}\n\n"
+        f"Ошибка:\n{err_str}"
+    )
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg[:4000])
+    except Exception:
+        logger.exception("Failed to notify admin")
+
+
+async def error_handler(update, context):
+    """Глобальная сетка безопасности — ловит ЛЮБУЮ необработанную ошибку в любом хендлере."""
+    logger.exception("Unhandled error", exc_info=context.error)
+    tb = "".join(traceback.format_exception(type(context.error), context.error, context.error.__traceback__))
+    user_info = "unknown"
+    if isinstance(update, Update) and update.effective_user:
+        u = update.effective_user
+        user_info = f"@{u.username or 'без username'} (id {u.id}, {u.full_name})"
+    msg = (
+        f"🚨 Необработанная ошибка в боте\n\n"
+        f"User: {user_info}\n\n"
+        f"Traceback:\n{tb[-2500:]}"
+    )
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg[:4000])
+    except Exception:
+        logger.exception("Failed to send error notification to admin")
 
 SYSTEM_PROMPT = """Ты — продающий ассистент Михаила Денисова, эксперта по международному бизнесу и Google Grants.
 
@@ -198,14 +235,22 @@ async def ai_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-    response = ai_client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=500,
-        system=SYSTEM_PROMPT,
-        messages=messages
-    )
-
-    ai_text = response.content[0].text
+    try:
+        response = ai_client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=500,
+            system=SYSTEM_PROMPT,
+            messages=messages
+        )
+        ai_text = response.content[0].text
+    except Exception as e:
+        logger.exception("AI agent (ai_agent) failed")
+        await notify_admin_ai_failure(context, user, "ai_agent", e, user_text)
+        await update.message.reply_text(
+            "Извини, технический сбой. Михаил уже получил уведомление — "
+            "напиши /start через минуту, либо напрямую @MikhailDe."
+        )
+        return
     messages.append({"role": "assistant", "content": ai_text})
     context.user_data["messages"] = messages
 
@@ -714,17 +759,27 @@ async def calc_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Tool use loop — Claude может попросить вызвать инструмент, мы возвращаем результат, он отвечает текстом
     for _ in range(5):  # макс 5 итераций tool use в одном ходе
-        response = ai_client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=800,
-            system=[{
-                "type": "text",
-                "text": CALC_AI_SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            tools=[CALC_TOOL],
-            messages=messages,
-        )
+        try:
+            response = ai_client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=800,
+                system=[{
+                    "type": "text",
+                    "text": CALC_AI_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                tools=[CALC_TOOL],
+                messages=messages,
+            )
+        except Exception as e:
+            logger.exception("AI agent (calc_ai_handler) failed")
+            await notify_admin_ai_failure(context, user, "calc_ai_handler", e, user_text)
+            await update.message.reply_text(
+                "Извини, технический сбой в калькуляторе. Михаил уже знает — "
+                "попробуй через минуту или напиши ему лично @MikhailDe."
+            )
+            context.user_data["calc_ai_messages"] = messages
+            return
 
         # сохраняем ассистент-блок целиком (текст + tool_use)
         assistant_blocks = [block.model_dump() for block in response.content]
@@ -815,6 +870,7 @@ def main():
     app.add_handler(CommandHandler("calcform", calc_start))  # fallback: жёсткая форма
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
+    app.add_error_handler(error_handler)
     logger.info("Bot is running...")
     app.run_polling()
 
