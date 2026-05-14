@@ -199,7 +199,7 @@ async def ai_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     response = ai_client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-4-5",
         max_tokens=500,
         system=SYSTEM_PROMPT,
         messages=messages
@@ -715,7 +715,7 @@ async def calc_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Tool use loop — Claude может попросить вызвать инструмент, мы возвращаем результат, он отвечает текстом
     for _ in range(5):  # макс 5 итераций tool use в одном ходе
         response = ai_client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-5",
             max_tokens=800,
             system=[{
                 "type": "text",
@@ -795,6 +795,17 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("ai_active"):
         await ai_agent(update, context)
         return
+    # fallback — пользователь пишет в бота без активной сессии
+    keyboard = [
+        [InlineKeyboardButton("▶️ Смотреть видео №1", url=VIDEO1_URL)],
+        [InlineKeyboardButton("Смотрел, хочу дальше →", callback_data="after_video1")],
+    ]
+    await update.message.reply_text(
+        "Привет! Чтобы начать — нажми /start или /calc (калькулятор упущенной прибыли).\n\n"
+        "Или сразу первое видео 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
+    )
 
 
 def main():
